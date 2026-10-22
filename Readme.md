@@ -15,7 +15,7 @@ Data cut-off: 21 October 2026, 22:30 UTC. Cloudflare rule state re-checked on 22
 - **Impact:** Remote code execution on the web server with no login. On Apache with mod_php the attack lands before your application code even starts. CVE-2026-109619 can also leak server memory.
 - **Status:** Fixed on 21 October 2026. Scanning and exploit attempts started hours before the fix went public. Nobody had publicly confirmed a successful break-in at the time of writing, and neither CVE is in CISA's Known Exploited Vulnerabilities catalog yet.
 - **Who's safe:** PHP 8.2.35, 8.3.36, 8.4.27, 8.5.12 or later, or a vendor package that backports the fix, with every PHP process restarted afterwards.
-- **Who's at risk:** Anything running PHP that answers web requests. WordPress, Drupal, Joomla, Magento, Laravel, custom apps, hosting panels, and appliances with a PHP admin page. PHP 8.1 and older are worst off, because there is no official release for them.
+- **Who's at risk:** Anything running PHP that answers web requests. WordPress, Drupal, Joomla, Magento, Laravel, Symfony, Nextcloud, Moodle, custom apps, hosting panels, and appliances with a PHP admin page. PHP 8.1 and older are worst off, because there is no official release for them.
 
 *Sources: PHP advisory 2026-10-21-5, GHSA-w8hw-w9fx-j79w, GHSA-6wmf-4rv5-p3rp, NVD, CISA alert of 21 October 2026, VulnCheck and watchTowr telemetry*
 
@@ -164,6 +164,31 @@ The `php` on your path is the command-line binary. Your web server may run a dif
 | Appliances | Palo Alto PAN-OS and Panorama affected with no fix yet. Cisco ISE, Catalyst Center and SD-WAN Manager under investigation. OPNsense fixed. Sophos products not affected | No statement found from F5, Citrix, Juniper (J-Web), pfSense, Synology or QNAP at cut-off |
 
 *Sources: vendor advisories listed under Additional Resources, from a 97-row vendor matrix compiled for this analysis (snapshot 21 October 2026, 22:16 UTC)*
+
+### Frameworks, CMSs and apps
+
+None of these projects has a bug of its own here. Each one is exposed because it runs on PHP, and on Apache with mod_php the attack lands before the framework's code even starts. Framework updates, security modules and firewall plugins can't fix it. Wordfence itself tells people to update PHP on the server. The fix is the same everywhere: patch PHP, then restart it.
+
+The table shows what each project had said by the cut-off, and whether its official Docker image ships a fixed PHP.
+
+| Framework or app | What the project said | Official Docker image | Notes |
+| --- | --- | --- | --- |
+| **WordPress** | WordPress.org: no defect in WordPress, no WordPress update planned. Update PHP | `wordpress` on PHP 8.3.36 | Wiz reports an unauthenticated RCE demo. Automattic patched WordPress.com, VIP, Pressable and WP Cloud. WP Engine and Kinsta were mid-rollout (Kinsta had only 8.5 patched at 18:56 UTC). Wordfence and Patchstack: update PHP on the server |
+| **Drupal** | PSA-2026-10-20: no defect in Drupal core. Update PHP | `drupal` on PHP 8.5.12 | Wiz reports an unauthenticated RCE demo that used a path only PHP 8.5 has, so on 8.5 the `fatal_error_backtraces = 0` stopgap matters most. Pantheon patched 8.2 to 8.5 on live sites, older branches still rolling out. Upsun images updated for 8.2 to 8.5. Acquia: no statement at cut-off |
+| **Joomla** | No statement found | `joomla` on PHP 8.4.27 | Wiz reports an RCE demo against Joomla too |
+| **Magento / Adobe Commerce** | No statement or Adobe bulletin found | No official image | Some checkouts post multipart forms, so test before you block multipart as a stopgap |
+| **Laravel** | Laravel blog: Laravel Cloud apps patched in place. Forge has an "Update PHP" action for 8.2 to 8.5 | No official image | Forge servers on Ubuntu 20.04 or older can't use it, and Laravel has no patch for 8.0 or 8.1 on Forge or Vapor. Restart queue workers, Horizon and Octane after patching |
+| **Symfony, CodeIgniter, CakePHP, Yii, Laminas, Slim** | Framework code isn't involved | No official image | Exposed exactly as much as the PHP underneath. Restart Messenger and other long-running workers after patching |
+| **Nextcloud** | Admin wiki: run a fixed PHP | `nextcloud` on PHP 8.5.12, All-in-One v14.4.1 | Snap package updated too |
+| **MediaWiki** | Wikimedia paused deployments | `mediawiki` 1.46.2 on PHP 8.3.36 | |
+| **Moodle** | Moodle news post. Moodle HQ's own hosting patched | `moodlehq/moodle-php-apache` still on 8.3.35 at check | Rebuild your own images |
+| **Matomo** | Blog post with guidance | `matomo` on PHP 8.4.27 | |
+| **PrestaShop** | No statement found | Images still on 8.2.34 to 8.5.11 at check | |
+| **phpMyAdmin** | No statement found | Official `phpmyadmin` on PHP 8.3.36. The project's own `phpmyadmin/phpmyadmin` image still on 8.3.26 | Keep it off the internet |
+| **TYPO3, Shopware, WHMCS, Roundcube** | No statement found | Roundcube `latest` on 8.4.27, other variants lagging | |
+| **FrankenPHP, LiteSpeed, Swoole, RoadRunner, Workerman** | FrankenPHP v1.13.2 fixed. LiteSpeed lsphp packages fixed. Swoole images being rebuilt. No statement from RoadRunner or Workerman | | FrankenPHP and LiteSpeed ship their own PHP, so update that package, not just the system PHP |
+
+*Sources: WordPress.org, Drupal PSA-2026-10-20, Laravel blog, Wikimedia, Matomo, Moodle, Automattic, Wiz, hosting status pages and Docker registry data, captured on 21 October 2026*
 
 ---
 
@@ -554,6 +579,11 @@ sudo systemctl restart lsws && sudo pkill lsphp
 # Supervisor-managed workers (Laravel queues and Octane, Symfony Messenger)
 sudo supervisorctl restart all
 
+# Or have the framework recycle its own workers (Supervisor starts fresh ones)
+php artisan queue:restart                  # Laravel queues
+php artisan horizon:terminate              # Laravel Horizon
+php bin/console messenger:stop-workers     # Symfony Messenger
+
 # FrankenPHP: move to v1.13.2 or later
 frankenphp version
 ```
@@ -635,13 +665,34 @@ find /var/www -name '*.php' -mtime -7 -print0 2>/dev/null \
   | xargs -0 grep -lE 'eval\(|assert\(|gzinflate\(|shell_exec\(|passthru\(|base64_decode\(' 2>/dev/null
 ```
 
-**WordPress quick checks:**
+**CMS and framework quick checks** (run each from the application's root directory):
 
 ```bash
+# WordPress (WP-CLI)
 wp core verify-checksums
 wp plugin verify-checksums --all
 wp user list --role=administrator --fields=ID,user_login,user_registered
+
+# Drupal: PHP files never belong in the public files directory
+find sites/*/files -name '*.php' 2>/dev/null
+drush sql:query "SELECT uid, name, created FROM users_field_data ORDER BY created DESC LIMIT 20"
+
+# Joomla 4 and 5
+php cli/joomla.php user:list
+find images tmp -name '*.php' 2>/dev/null
+
+# Magento / Adobe Commerce: no PHP belongs in pub/media or pub/static
+find pub/media pub/static -name '*.php' 2>/dev/null
+
+# Laravel and Symfony: only index.php belongs in public/
+find public -name '*.php' ! -name index.php 2>/dev/null
+find storage -name '*.php' -not -path 'storage/framework/views/*' 2>/dev/null    # Laravel
+
+# Nextcloud
+sudo -u www-data php occ integrity:check-core
 ```
+
+On Magento, also review admin accounts under System > Permissions > All Users.
 
 **Process and persistence indicators:**
 
@@ -668,7 +719,7 @@ sudo grep -rE 'curl|wget|base64|/dev/tcp' /etc/cron* /var/spool/cron 2>/dev/null
 - [ ] No unexplained outbound connections from the web tier
 - [ ] Core and plugin checksums clean (WordPress)
 
-**If ANY indicator turns up:** start incident response. Keep in mind that the memory leak leaves nothing on disk. If a server showed the startup out-of-memory pattern or bursts of crashes before you patched, rotate everything it could see: database passwords, API keys, framework secrets (Laravel `APP_KEY`, WordPress salts) and active sessions.
+**If ANY indicator turns up:** start incident response. Keep in mind that the memory leak leaves nothing on disk. If a server showed the startup out-of-memory pattern or bursts of crashes before you patched, rotate everything it could see: database passwords, API keys, framework secrets and active sessions. Framework secrets means WordPress salts (`wp config shuffle-salts`), Drupal's `hash_salt`, Joomla's `$secret`, Laravel's `APP_KEY` (Laravel 11 and later can keep the old key in `APP_PREVIOUS_KEYS` so encrypted data still decrypts), Symfony's `APP_SECRET` and the Magento encryption key (follow Adobe's documented procedure).
 
 *Sources: CrowdStrike, VulnCheck, php2shell.com, GHSA-6wmf-4rv5-p3rp, PHP and Apache source log formats, CISA*
 
@@ -1411,6 +1462,18 @@ docker build --pull --no-cache -t yourapp:php-fixed .
 
 ---
 
+**Q: We run Drupal, Joomla, Magento or Laravel. Does anything change?**
+
+**A:** The fix doesn't change: patch PHP and restart it. No framework release, module or security plugin fixes this. A few framework-specific points:
+
+- **Drupal on PHP 8.5:** Wiz's Drupal demo used a path that only exists in 8.5. If you can't patch today, set `fatal_error_backtraces = 0`.
+- **Magento and other shops:** some checkouts post multipart forms. Test checkout before you block multipart as a stopgap.
+- **Laravel and Symfony:** restart queue workers, Horizon, Octane and Messenger after patching, or they keep running the old PHP.
+- **Managed platforms:** Pantheon, Upsun, Laravel Cloud and Automattic had patched PHP 8.2 to 8.5 by the cut-off, while WP Engine and Kinsta were still rolling out. Get it in writing for your plan.
+- **If you find signs of compromise:** rotate the framework's own secrets too (see the list under Detection & Forensics).
+
+---
+
 **Q: Is the fix complete?**
 
 **A:** PHP says updating is the complete fix for both CVEs. Someone claimed on oss-security that 8.5.12 might be incomplete. The claim was passed to PHP, who called it unrelated and not a real issue.
@@ -1649,7 +1712,7 @@ THREAT LEVEL (21 Oct 2026, 22:30 UTC):
   Exploit attempts seen from 08:37 UTC on 21 Oct, before the patch
   No confirmed compromise published yet
   Not in CISA KEV yet, no EPSS score yet
-  Updating WordPress or plugins does NOT fix this
+  Updating your CMS, framework or plugins does NOT fix this
 
 ---------------------------------------------------------------
 IF COMPROMISED:
